@@ -1,0 +1,27 @@
+# Dependencies
+/deps/
+
+# Build artifacts
+/_build/
+/cover/
+/doc/
+*.ez
+*.beam
+
+# Rust NIF build artifacts
+/native/cashew/target/
+/priv/native/
+
+# Crash dumps
+erl_crash.dump
+
+# Editor/IDE files
+.elixir_ls/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
