@@ -588,12 +588,16 @@ fn compute_dleq_response(r_nonce: &SecretKey, e_bytes: &[u8; 32], privkey: &Secr
     let mut k_sk_bytes = privkey.secret_bytes();
 
     let mut r = u256_from_bytes(&r_sk_bytes);
-    let e = u256_from_bytes(e_bytes);
+    let e_raw = u256_from_bytes(e_bytes);
     let mut k = u256_from_bytes(&k_sk_bytes);
     let n = u256_from_bytes(&N);
 
     r_sk_bytes.zeroize();
     k_sk_bytes.zeroize();
+
+    // SHA-256 output may exceed n; reduce explicitly so the inputs to
+    // addmod_u256 inside mulmod_u256 satisfy its < n precondition.
+    let e = reduce_u256(e_raw, n);
 
     // s = (r + e * k) mod n
     let mut ek = mulmod_u256(e, k, n);
@@ -679,7 +683,20 @@ fn u256_ge(a: U256, b: U256) -> bool {
     a.0 > b.0 || (a.0 == b.0 && a.1 >= b.1)
 }
 
-// Modular addition: (a + b) mod n
+// Reduce a 256-bit value modulo n. Loops until the value is < n so a
+// single subtraction is enough to keep addmod_u256 correct after a
+// wrapping addition near the field boundary.
+fn reduce_u256(mut a: U256, n: U256) -> U256 {
+    while u256_ge(a, n) {
+        a = u256_sub(a, n);
+    }
+    a
+}
+
+// Modular addition: (a + b) mod n.
+// Inputs MUST satisfy a < n and b < n. The doubling loop in
+// mulmod_u256 maintains this invariant; external callers should
+// pre-reduce via reduce_u256.
 fn addmod_u256(a: U256, b: U256, n: U256) -> U256 {
     let (sum, overflow) = u256_add(a, b);
     if overflow || u256_ge(sum, n) {
@@ -689,8 +706,10 @@ fn addmod_u256(a: U256, b: U256, n: U256) -> U256 {
     }
 }
 
-// Modular multiplication: (a * b) mod n
-// Uses shift-and-add method for 256-bit values.
+// Modular multiplication: (a * b) mod n.
+// Reduces both inputs modulo n before the doubling loop so the
+// addmod_u256 precondition (operands < n) holds even when callers
+// pass raw SHA-256 output that exceeds n.
 //
 // SECURITY NOTE: The shift-and-add approach has variable-time execution but is
 // acceptable because DLEQ proofs use public nonces — the secret key enters via
@@ -698,16 +717,16 @@ fn addmod_u256(a: U256, b: U256, n: U256) -> U256 {
 // compared to the NIF call overhead.
 fn mulmod_u256(a: U256, b: U256, n: U256) -> U256 {
     let mut result: U256 = (0, 0);
-    let mut base = a;
+    let mut base = reduce_u256(a, n);
 
-    // Process each bit of b from LSB to MSB
+    // Process each bit of b from LSB to MSB.
     let mut b_val = b;
     for _ in 0..256 {
         if b_val.1 & 1 == 1 {
             result = addmod_u256(result, base, n);
         }
-        base = addmod_u256(base, base, n); // double
-                                           // Right shift b by 1
+        base = addmod_u256(base, base, n);
+        // Right shift b by 1.
         let high_bit = (b_val.0 & 1) << 127;
         b_val = (b_val.0 >> 1, (b_val.1 >> 1) | high_bit);
     }
