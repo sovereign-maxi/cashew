@@ -40,7 +40,7 @@ defmodule Cashew.HashToCurveTest do
       input = "not_sha256"
       {:ok, point} = Cashew.hash_to_curve(input)
       sha = :crypto.hash(:sha256, input)
-      # The point is 33 bytes (with prefix), sha is 32 bytes — structurally different
+      # The point is 33 bytes (with prefix), sha is 32 bytes; structurally different.
       assert point != <<0x02>> <> sha
       assert point != <<0x03>> <> sha
     end

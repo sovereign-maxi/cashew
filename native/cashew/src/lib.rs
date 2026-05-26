@@ -420,10 +420,10 @@ fn generate_dleq_proof<'a>(env: Env<'a>, privkey: Binary<'a>, b_prime: Binary<'a
 
     let secp = Secp256k1::new();
 
-    // K = pubkey(k) — mint's public key
+    // K = pubkey(k): mint's public key
     let k_pub = PublicKey::from_secret_key(&secp, &secret_key);
 
-    // C' = k * B' — the blind signature
+    // C' = k * B': the blind signature
     let scalar_k = Scalar::from(secret_key);
     let c_prime = match b_prime_point.mul_tweak(&secp, &scalar_k) {
         Ok(point) => point,
@@ -443,7 +443,7 @@ fn generate_dleq_proof<'a>(env: Env<'a>, privkey: Binary<'a>, b_prime: Binary<'a
         Err(_) => return make_error(env, "scalar_multiplication_failed"),
     };
 
-    // e = SHA256(R1 || R2 || K || C') — all as compressed 33-byte points
+    // e = SHA256(R1 || R2 || K || C'), all as compressed 33-byte points.
     let e_hash = hash_dleq_challenge(&r1, &r2, &k_pub, &c_prime);
 
     // s = r_nonce + e * k (mod n)
@@ -632,7 +632,7 @@ fn scalar_from_bytes(bytes: &[u8]) -> Scalar {
     let mut reduced_bytes = u256_to_bytes(reduced);
 
     // SecretKey::from_slice rejects zero. For DLEQ verification, a zero scalar
-    // means the proof is invalid — return Scalar::ZERO which will cause the
+    // means the proof is invalid; return Scalar::ZERO which will cause the
     // verification check to fail (correct behavior).
     let scalar = match SecretKey::from_slice(&reduced_bytes) {
         Ok(sk) => Scalar::from(sk),
@@ -711,10 +711,20 @@ fn addmod_u256(a: U256, b: U256, n: U256) -> U256 {
 // addmod_u256 precondition (operands < n) holds even when callers
 // pass raw SHA-256 output that exceeds n.
 //
-// SECURITY NOTE: The shift-and-add approach has variable-time execution but is
-// acceptable because DLEQ proofs use public nonces — the secret key enters via
-// a single scalar multiply, and timing leakage from U256 operations is negligible
-// compared to the NIF call overhead.
+// SECURITY NOTE: This is a variable-time shift-and-add multiplication.
+// In `compute_dleq_response` it is called as `mulmod_u256(e, k, n)` where
+// `e` is the public challenge and `k` is the mint's secret key, so the
+// per-iteration branch leaks information about `k` to anyone who can
+// measure execution time precisely.
+//
+// The defense relies on the NIF + Erlang-scheduler boundary masking
+// nanosecond-scale variation: a remote attacker measuring DLEQ generation
+// over the network sees jitter on the order of milliseconds, which swamps
+// the ~256-iteration timing delta. A LOCAL attacker with cache-timing
+// or precise measurement capability is NOT defended. Mints are server-side
+// processes; if local-attacker resistance becomes relevant, replace this
+// with a constant-time scalar mul (Montgomery ladder) or wire through to
+// libsecp256k1's internal scalar arithmetic.
 fn mulmod_u256(a: U256, b: U256, n: U256) -> U256 {
     let mut result: U256 = (0, 0);
     let mut base = reduce_u256(a, n);

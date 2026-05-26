@@ -15,13 +15,14 @@ Built with [Rustler](https://github.com/rustler-elixir/rustler) on top of
 | DLEQ proofs on blind signatures | [NUT-12](https://github.com/cashubtc/nuts/blob/main/12.md) |
 | BIP-340 Schnorr signing / verification | [BIP-340](https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki) |
 
-All functions operate on raw binaries — no structs, no protocol-level framing.
-Higher-level Cashu token types live in the consuming application.
+All functions operate on raw binaries; there are no structs and no
+protocol-level framing. Higher-level Cashu token types live in the
+consuming application.
 
 ## Prerequisites
 
 - Elixir >= 1.17
-- Rust toolchain (stable) — the NIF compiles automatically via Rustler
+- Rust toolchain (stable); the NIF compiles automatically via Rustler
 
 ## Installation
 
