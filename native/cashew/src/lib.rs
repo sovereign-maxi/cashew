@@ -620,15 +620,11 @@ fn scalar_from_bytes(bytes: &[u8]) -> Scalar {
         0x41, 0x41,
     ];
 
-    // Reduce the bytes modulo n to get a valid scalar.
-    // If bytes represent a value >= n, reduce it.
+    // Reduce the bytes modulo n to get a valid scalar. Constant-time
+    // via the reduce_u256 helper (masked select over one subtraction).
     let val = u256_from_bytes(bytes);
     let n = u256_from_bytes(&N);
-    let reduced = if u256_ge(val, n) {
-        u256_sub(val, n)
-    } else {
-        val
-    };
+    let reduced = reduce_u256(val, n);
     let mut reduced_bytes = u256_to_bytes(reduced);
 
     // SecretKey::from_slice rejects zero. For DLEQ verification, a zero scalar
@@ -671,71 +667,112 @@ fn u256_add(a: U256, b: U256) -> (U256, bool) {
     ((high, low), carry2 || carry3)
 }
 
-// 256-bit subtraction
+// 256-bit subtraction. Constant-time: propagates borrow via
+// wrapping arithmetic with no data-dependent branch.
 fn u256_sub(a: U256, b: U256) -> U256 {
     let (low, borrow1) = a.1.overflowing_sub(b.1);
     let (high, _) = a.0.overflowing_sub(b.0);
-    let high = if borrow1 { high.wrapping_sub(1) } else { high };
-    (high, low)
+    let borrow_mask = 0u128.wrapping_sub(borrow1 as u128);
+    // borrow_mask is either 0 or all-1s; adding it via wrapping_add
+    // subtracts 1 iff borrow1 was true. Constant-time.
+    (high.wrapping_add(borrow_mask), low)
 }
 
-fn u256_ge(a: U256, b: U256) -> bool {
-    a.0 > b.0 || (a.0 == b.0 && a.1 >= b.1)
+// Constant-time all-1s-if-nonzero mask for u128. Returns 0u128 iff x == 0.
+fn ct_nonzero_mask_u128(x: u128) -> u128 {
+    // (!x & (x - 1)) has the high bit set iff x == 0; use that.
+    // Simpler: (x | 0u128.wrapping_sub(x)) >> 127 gives 1 iff x != 0.
+    // But we want 0 or all-1s. Multiply out.
+    let bit = ((x | 0u128.wrapping_sub(x)) >> 127) & 1;
+    0u128.wrapping_sub(bit)
 }
 
-// Reduce a 256-bit value modulo n. Loops until the value is < n so a
-// single subtraction is enough to keep addmod_u256 correct after a
-// wrapping addition near the field boundary.
-fn reduce_u256(mut a: U256, n: U256) -> U256 {
-    while u256_ge(a, n) {
-        a = u256_sub(a, n);
+// Constant-time equality check for u128: returns all-1s mask if a == b, 0 otherwise.
+fn ct_eq_mask_u128(a: u128, b: u128) -> u128 {
+    !ct_nonzero_mask_u128(a ^ b)
+}
+
+// Constant-time greater-than for u128: returns all-1s mask if a > b, 0 otherwise.
+fn ct_gt_mask_u128(a: u128, b: u128) -> u128 {
+    // a > b iff (b - a) borrows. Extract the borrow bit constant-time.
+    let (_, borrow) = b.overflowing_sub(a);
+    0u128.wrapping_sub(borrow as u128)
+}
+
+// Constant-time a >= b for U256, returned as an all-1s mask.
+fn ct_ge_mask_u256(a: U256, b: U256) -> u128 {
+    let gt_high = ct_gt_mask_u128(a.0, b.0);
+    let eq_high = ct_eq_mask_u128(a.0, b.0);
+    // low comparison: a.1 >= b.1 iff !(a.1 < b.1) iff !((a.1 - b.1) borrows).
+    let (_, borrow) = a.1.overflowing_sub(b.1);
+    let ge_low = !0u128.wrapping_sub(borrow as u128);
+    gt_high | (eq_high & ge_low)
+}
+
+// Constant-time select for U256: returns `when_one` if mask is all-1s, `when_zero` if all-0s.
+fn ct_select_u256(mask: u128, when_one: U256, when_zero: U256) -> U256 {
+    (
+        (when_one.0 & mask) | (when_zero.0 & !mask),
+        (when_one.1 & mask) | (when_zero.1 & !mask),
+    )
+}
+
+// Reduce a 256-bit value modulo n, constant-time. Loops for a fixed
+// upper bound (2 iterations is enough for SHA-256 output where the
+// input can be at most ~2n) and uses masked subtraction so the
+// number of iterations reveals nothing about the operand.
+fn reduce_u256(a: U256, n: U256) -> U256 {
+    // Two iterations suffices: SHA-256 output < 2^256, n ~ 2^256, so
+    // a < 2n and one subtract-if-ge is enough. The second iteration
+    // is defense-in-depth (also handles a slightly larger input).
+    let mut cur = a;
+
+    for _ in 0..2 {
+        let mask = ct_ge_mask_u256(cur, n);
+        let subbed = u256_sub(cur, n);
+        cur = ct_select_u256(mask, subbed, cur);
     }
-    a
+
+    cur
 }
 
-// Modular addition: (a + b) mod n.
-// Inputs MUST satisfy a < n and b < n. The doubling loop in
-// mulmod_u256 maintains this invariant; external callers should
-// pre-reduce via reduce_u256.
+// Modular addition, constant-time. Inputs MUST satisfy a < n and
+// b < n; the doubling loop in `mulmod_u256` maintains this invariant.
 fn addmod_u256(a: U256, b: U256, n: U256) -> U256 {
     let (sum, overflow) = u256_add(a, b);
-    if overflow || u256_ge(sum, n) {
-        u256_sub(sum, n)
-    } else {
-        sum
-    }
+    let reduced = u256_sub(sum, n);
+
+    // Take reduced iff sum overflowed OR sum >= n. Constant-time
+    // masks throughout.
+    let overflow_mask = 0u128.wrapping_sub(overflow as u128);
+    let ge_mask = ct_ge_mask_u256(sum, n);
+    let take_reduced = overflow_mask | ge_mask;
+
+    ct_select_u256(take_reduced, reduced, sum)
 }
 
-// Modular multiplication: (a * b) mod n.
-// Reduces both inputs modulo n before the doubling loop so the
-// addmod_u256 precondition (operands < n) holds even when callers
-// pass raw SHA-256 output that exceeds n.
-//
-// SECURITY NOTE: This is a variable-time shift-and-add multiplication.
-// In `compute_dleq_response` it is called as `mulmod_u256(e, k, n)` where
-// `e` is the public challenge and `k` is the mint's secret key, so the
-// per-iteration branch leaks information about `k` to anyone who can
-// measure execution time precisely.
-//
-// The defense relies on the NIF + Erlang-scheduler boundary masking
-// nanosecond-scale variation: a remote attacker measuring DLEQ generation
-// over the network sees jitter on the order of milliseconds, which swamps
-// the ~256-iteration timing delta. A LOCAL attacker with cache-timing
-// or precise measurement capability is NOT defended. Mints are server-side
-// processes; if local-attacker resistance becomes relevant, replace this
-// with a constant-time scalar mul (Montgomery ladder) or wire through to
-// libsecp256k1's internal scalar arithmetic.
+// Modular multiplication, constant-time. Reduces both inputs modulo n
+// then walks the 256 bits of `b` with a masked add (always compute
+// the sum; select via a mask derived from the current bit). Every
+// iteration executes the same arithmetic regardless of `b`'s bit
+// pattern, so a cache/timing attacker learns nothing about `b` —
+// including when `b` is the mint's private key inside
+// `compute_dleq_response`.
 fn mulmod_u256(a: U256, b: U256, n: U256) -> U256 {
     let mut result: U256 = (0, 0);
     let mut base = reduce_u256(a, n);
-
-    // Process each bit of b from LSB to MSB.
     let mut b_val = b;
+
     for _ in 0..256 {
-        if b_val.1 & 1 == 1 {
-            result = addmod_u256(result, base, n);
-        }
+        let bit = b_val.1 & 1;
+        let bit_mask = 0u128.wrapping_sub(bit);
+
+        let candidate = addmod_u256(result, base, n);
+        result = ct_select_u256(bit_mask, candidate, result);
+
+        // Always double base regardless of bit value.
         base = addmod_u256(base, base, n);
+
         // Right shift b by 1.
         let high_bit = (b_val.0 & 1) << 127;
         b_val = (b_val.0 >> 1, (b_val.1 >> 1) | high_bit);
@@ -842,10 +879,20 @@ mod u256_tests {
     }
 
     #[test]
-    fn test_u256_ge() {
-        assert!(u256_ge((1, 0), (0, u128::MAX)));
-        assert!(u256_ge((0, 5), (0, 5)));
-        assert!(!u256_ge((0, 4), (0, 5)));
+    fn test_ct_ge_mask_u256() {
+        let all_ones: u128 = !0u128;
+        assert_eq!(ct_ge_mask_u256((1, 0), (0, u128::MAX)), all_ones);
+        assert_eq!(ct_ge_mask_u256((0, 5), (0, 5)), all_ones);
+        assert_eq!(ct_ge_mask_u256((0, 4), (0, 5)), 0);
+        // Cross-boundary: (0, 5) < (1, 0).
+        assert_eq!(ct_ge_mask_u256((0, 5), (1, 0)), 0);
+    }
+
+    #[test]
+    fn test_ct_select_u256() {
+        let all_ones: u128 = !0u128;
+        assert_eq!(ct_select_u256(all_ones, (1, 2), (3, 4)), (1, 2));
+        assert_eq!(ct_select_u256(0, (1, 2), (3, 4)), (3, 4));
     }
 
     #[test]
