@@ -6,6 +6,8 @@ Elixir NIF bindings for secp256k1 cryptographic primitives used by the
 Built with [Rustler](https://github.com/rustler-elixir/rustler) on top of
 [`secp256k1`](https://crates.io/crates/secp256k1) (libsecp256k1 bindings).
 
+Source: [github.com/sovereign-maxi/cashew](https://github.com/sovereign-maxi/cashew)
+
 ## What it does
 
 | Capability | Spec |
@@ -29,7 +31,7 @@ consuming application.
 Add as a path dependency in your `mix.exs`:
 
 ```elixir
-{:cashew, path: "../packages/cashew"}
+{:cashew, path: "../cashew"}
 ```
 
 ## Usage
